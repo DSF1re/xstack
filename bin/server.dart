@@ -163,7 +163,45 @@ class AppApi {
           .toList();
       return Response.ok(jsonEncode(users));
     });
+    router.get('/users/<id>', (Request request, String id) async {
+      try {
+        final userId = int.tryParse(id);
+        if (userId == null) {
+          return Response.badRequest(
+            body: jsonEncode({'error': 'Некорректный формат ID'}),
+          );
+        }
 
+        final result = await conn.execute(
+          r'SELECT id, name, surname, patronymic, email, date_of_birth FROM client WHERE id = $1',
+          parameters: [userId],
+        );
+
+        if (result.isEmpty) {
+          return Response.notFound(
+            jsonEncode({'error': 'Пользователь не найден'}),
+          );
+        }
+
+        final r = result.first;
+        final user = {
+          'id': r[0],
+          'name': r[1],
+          'surname': r[2],
+          'patronymic': r[3],
+          'email': r[4],
+          'date_of_birth': r[5] is DateTime
+              ? (r[5] as DateTime).toIso8601String()
+              : r[5].toString(),
+        };
+
+        return Response.ok(jsonEncode(user));
+      } catch (e) {
+        return Response.internalServerError(
+          body: jsonEncode({'error': 'Ошибка сервера: $e'}),
+        );
+      }
+    });
     router.get('/services', (Request request) async {
       final res = await conn.execute(
         'SELECT id, name, price, category FROM service',
