@@ -1,10 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:crypt/crypt.dart';
 import 'package:postgres/postgres.dart';
 import 'package:shelf/shelf.dart';
-import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf/shelf_io.dart';
+import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf_swagger_ui/shelf_swagger_ui.dart';
 
 void main() async {
@@ -81,6 +82,9 @@ class AppApi {
         final email = data['email']?.toString().trim() ?? '';
         final password = data['password']?.toString() ?? '';
         final name = data['name']?.toString().trim() ?? '';
+        final surname = data['surname']?.toString().trim() ?? '';
+        final patronymic = data['patronymic']?.toString().trim();
+        final dobString = data['date_of_birth']?.toString();
 
         if (name.isEmpty || email.isEmpty || password.length < 6) {
           return Response.badRequest(
@@ -99,19 +103,33 @@ class AppApi {
         }
 
         final hashedPassword = Crypt.sha256(password).toString();
-        await conn.execute(
-          r'INSERT INTO client (name, surname, email, password, date_of_birth) VALUES ($1, $2, $3, $4, $5)',
+
+        final insertResult = await conn.execute(
+          r'''INSERT INTO client (name, surname, patronymic, email, password, date_of_birth) 
+          VALUES ($1, $2, $3, $4, $5, $6) RETURNING id''',
           parameters: [
             name,
-            data['surname'] ?? '',
+            surname,
+            patronymic,
             email,
             hashedPassword,
-            data['date_of_birth'],
+            dobString != null ? DateTime.parse(dobString) : null,
           ],
         );
 
+        final newId = insertResult.first[0];
+
         return Response.ok(
-          jsonEncode({'status': 'success', 'message': 'Пользователь создан'}),
+          jsonEncode({
+            'id': newId,
+            'name': name,
+            'surname': surname,
+            'patronymic': patronymic,
+            'email': email,
+            'password': '',
+            'date_of_birth': dobString,
+          }),
+          headers: {'Content-Type': 'application/json'},
         );
       } catch (e) {
         return Response.internalServerError(
@@ -121,31 +139,48 @@ class AppApi {
     });
 
     router.post('/auth/login', (Request request) async {
-      final payload = await request.readAsString();
-      final data = jsonDecode(payload);
-      final email = data['email'];
-      final password = data['password'];
+      try {
+        final payload = await request.readAsString();
+        final data = jsonDecode(payload);
+        final email = data['email'];
+        final password = data['password'];
 
-      final result = await conn.execute(
-        r'SELECT id, password, name FROM client WHERE email = $1',
-        parameters: [email],
-      );
-      if (result.isEmpty) {
-        return Response.forbidden(
-          jsonEncode({'error': 'Пользователь не найден'}),
+        final result = await conn.execute(
+          r'SELECT id, name, surname, patronymic, email, password, date_of_birth FROM client WHERE email = $1',
+          parameters: [email],
+        );
+
+        if (result.isEmpty) {
+          return Response.forbidden(
+            jsonEncode({'error': 'Пользователь не найден'}),
+          );
+        }
+
+        final userRow = result.first;
+
+        if (Crypt(userRow[5] as String).match(password)) {
+          final userJson = {
+            'id': userRow[0],
+            'name': userRow[1],
+            'surname': userRow[2],
+            'patronymic': userRow[3],
+            'email': userRow[4],
+            'password': '',
+            'date_of_birth': (userRow[6] as DateTime).toIso8601String(),
+          };
+
+          return Response.ok(
+            jsonEncode(userJson),
+            headers: {'Content-Type': 'application/json'},
+          );
+        }
+
+        return Response.forbidden(jsonEncode({'error': 'Неверный пароль'}));
+      } catch (e) {
+        return Response.internalServerError(
+          body: jsonEncode({'error': e.toString()}),
         );
       }
-
-      final userRow = result.first;
-      if (Crypt(userRow[1] as String).match(password)) {
-        return Response.ok(
-          jsonEncode({
-            'status': 'success',
-            'user': {'id': userRow[0], 'name': userRow[2]},
-          }),
-        );
-      }
-      return Response.forbidden(jsonEncode({'error': 'Неверный пароль'}));
     });
 
     router.get('/users', (Request request) async {
@@ -199,11 +234,9 @@ class AppApi {
       );
     });
 
-    // --- Эндпоинты Услуг и Заказов ---
-
     router.get('/services', (Request request) async {
       final res = await conn.execute(
-        'SELECT id, name, price, category FROM service',
+        'SELECT id, name, description, price, image_url, category, rating FROM service',
       );
       return Response.ok(
         jsonEncode(
@@ -212,8 +245,11 @@ class AppApi {
                 (r) => {
                   'id': r[0],
                   'name': r[1],
-                  'price': r[2],
-                  'category': r[3].toString(),
+                  'description': r[2],
+                  'price': r[3],
+                  'image_url': r[4],
+                  'category': r[5],
+                  'rating': r[6],
                 },
               )
               .toList(),
